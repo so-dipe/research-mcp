@@ -1,0 +1,9 @@
+{
+	"servers": {
+		"ngx": {
+			"url": "http://localhost:8000/sse",
+			"type": "http"
+		}
+	},
+	"inputs": []
+}

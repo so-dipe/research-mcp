@@ -19,5 +19,6 @@
                 "ms-python.debugpy"
             ]
         }
-    }
+    },
+    "forwardPorts": [8000]
 }
