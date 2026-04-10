@@ -1,13 +1,15 @@
 import json
 import hashlib
-from pathlib import Path
 
-MANIFEST_PATH = Path(__file__).resolve().parent / "data/manifest.json"
+from .constants import MANIFESTS_DIR
 
-def load_manifest() -> dict:
+MANIFEST_PATH = MANIFESTS_DIR / "ngx_manifest.json"
+
+def load_manifest() -> dict[str, dict]:
+    MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
+
     if not MANIFEST_PATH.exists():
         return {"documents": {}}
-        # raise FileNotFoundError(f"Manifest file not found at {MANIFEST_PATH}")
     
     with open(MANIFEST_PATH, "r") as f:
         return json.load(f)

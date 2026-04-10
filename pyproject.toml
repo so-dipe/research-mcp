@@ -5,10 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "httpx>=0.28.1",
+    "docling[easyocr,ocr]>=2.85.0",
+    "httpx[http2]>=0.28.1",
     "mcp-proxy>=0.11.0",
     "mcp[cli]>=1.27.0",
     "pandas>=3.0.2",
+    "pypdf>=6.9.2",
     "requests>=2.33.1",
     "xmltodict>=1.0.4",
 ]

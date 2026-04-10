@@ -1,184 +1,78 @@
 import os
-from pathlib import Path
+import asyncio
+import random
 
-import requests
+import httpx
 import pandas as pd
-import xmltodict
 
-from pipeline_utils import get_text
-from manifest import (
-    load_manifest,
-    save_manifest,
-    generate_doc_id,
-    hash_content
-)
+from .client import get_ngx_institutions, generate_filter, fetch_all_pages, get_doc_content
+from .constants import NGX_INSTITUTIONS_LITERAL, NGX_DOCS_PARAMS, NGX_DOCS_URL, TABLES_DIR
+from .parser import fetch_docs
+from .utils import load_manifest, save_manifest
 
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "application/atom+xml"
-}
+_ism: dict | None = None
 
-NGX_INSTITUTIONS_URL= "https://doclib.ngxgroup.com/REST/api/issuers/companydirectory?$orderby=CompanyName"
+def load_ngx_institutions(
+    columns: list[NGX_INSTITUTIONS_LITERAL] | None = None
+) -> pd.DataFrame:
+    csv_path = TABLES_DIR / "ngx_institutions.csv"
+    try:
+        df = get_ngx_institutions()
+    except Exception as e:
+        if csv_path.exists():
+            df = pd.read_csv(csv_path)
+        else:
+            return pd.DataFrame()
 
-NGX_DOCS_URL = "https://doclib.ngxgroup.com/_api/Web/Lists/GetByTitle('XFinancial_News')/items/"
+    return df[columns] if columns else df
 
-NGX_DOCS_PARAMS = {
-    "$select": "URL,Modified,InternationSecIN,Type_of_Submission",
-    "$orderby": "Modified desc"
-}
+def get_institution_symbol_map() -> dict:
+    global _ism
 
-SUBMISSION_FILTERS = {
-    "Financial Statement": ["Financial Statements", "EarningsForcast"],
-    "Corporate Actions": ["Corporate Actions", "Corporate Disclosures"],
-    "Director Dealings": ["DirectorDealings", "Director Dealings"]
-}
-
-def generate_filter(
-    institution_code: str,
-    doc_type: str
-) -> str:
-    filters = []
-
-    if institution_code:
-        institution_filter = f"InternationSecIN eq '{institution_code}'"
-        filters.append(institution_filter)
-
-    if doc_type in SUBMISSION_FILTERS:
-        submissions = SUBMISSION_FILTERS[doc_type]
-        doc_type_filter = " or ".join({
-            f"Type_of_Submission eq '{s}'"
-            for s in submissions
-        })
-        filters.append(f"({doc_type_filter})")
+    if _ism:
+        return _ism
     
-    return " and ".join(filters)
+    df = load_ngx_institutions(["InternationSecIN", "Symbol"])
+    if not df.empty:
+        return {
+            r["InternationSecIN"]: r["Symbol"]
+            for _, r in df.iterrows()
+        }
+    return {}
 
-def get_ngx_institutions() -> pd.DataFrame:
-    response = requests.get(NGX_INSTITUTIONS_URL)
-    response.raise_for_status()
-
-    data = response.json()
-    return pd.DataFrame(data)
-
-def fetch_all_pages(url: str, params: dict | None) -> list:
-    all_entries = []
-
-    while True:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-
-        data = xmltodict.parse(response.content)
-
-        feed = data.get("feed", {})
-
-        entries = feed.get("entry", [])
-
-        if isinstance(entries, dict):
-            entries = [entries]
-
-        all_entries.extend(entries)
-
-        next_url = None
-        links = feed.get("link", [])
-        if isinstance(links, dict):
-            links = [links]
-
-        for link in links:
-            if link.get("@rel") == "next":
-                next_url = link.get("@href", "")
-                break
-        
-        if not next_url:
-            break
-
-        url = next_url
-        params = None
-
-    return all_entries
-
-def fetch_docs(entries: list) -> list:
-    docs = []
-    for entry in entries:
-        props = entry.get("content", {}).get("m:properties", {})
-        url_info = props.get("d:URL", {})
-
-        docs.append({
-            "institution": props.get("d:InternationSecIn"),
-            "doc_name": get_text(url_info, "d:Description"),
-            "url": url_info.get("d:Url"),
-            "submission_type": get_text(props, "d:Type_of_Submission"),
-            "date_modified": props.get("d:Modified", {}).get("#text")
-        })
-
-    return docs
-
-def list_docs(
+async def list_docs(
     institution_code: str = "",
     doc_type: str = ""
-) -> pd.DataFrame:
+) -> list:
     params = {**NGX_DOCS_PARAMS}
     filter_str = generate_filter(institution_code, doc_type)
 
     if filter_str:
         params["$filter"] = filter_str
 
-    entries = fetch_all_pages(NGX_DOCS_URL, params)
+    entries = await fetch_all_pages(NGX_DOCS_URL, params)
     docs = fetch_docs(entries)
 
-    return pd.DataFrame(docs)
+    return docs
 
-def get_doc_content(doc_info: dict, manifest: dict) -> dict:
-    doc_id = generate_doc_id(doc_info)
 
-    existing_doc = manifest["documents"].get(doc_id)
-
-    if existing_doc and existing_doc.get("status") == "processed":
-        return {"status": "skipped", "reason": "already processed"}
-    
-    response = requests.get(doc_info["url"])
-    response.raise_for_status()
-
-    content_hash = hash_content(response.content)
-
-    if not doc_info.get("institution"):
-        return {"status": "skipped", "reason": "institution not found."}
-    
-    doc_extension = doc_info["url"].split(".")[-1].lower()
-
-    folder_path = Path(__file__).resolve().parent / f"data/{doc_info['institution']}"
-    os.makedirs(folder_path, exist_ok=True)
-
-    doc_path = folder_path / f"{doc_id}.{doc_extension}"
-
-    with open(doc_path, "wb") as f:
-        f.write(response.content)
-
-        manifest["documents"][doc_id] = {
-            "doc_info": doc_info,
-            "content_hash": content_hash,
-            "status": "processed",
-
-            "url": doc_info["url"],
-            "institution": doc_info["institution"],
-            "last_modified": doc_info["date_modified"],
-            "ingested_at": pd.Timestamp.now().isoformat()
-        }
-
-    save_manifest(manifest)
-
-    return {"status": "processed", "doc_id": doc_id}
-
-def ingest_docs(df: pd.DataFrame) -> pd.DataFrame:
+async def ingest_docs(docs: list) -> list:
     manifest = load_manifest()
+    symbol_map = get_institution_symbol_map()
 
-    results = []
-    for _, row in df.iterrows():
-        try:
-            doc_info = row.to_dict()
-            result = get_doc_content(doc_info, manifest)
-            results.append({**doc_info, **result})
-        except Exception as e:
-            print(f"Error occurred while processing row: {e}")
-            continue
+    semaphore = asyncio.Semaphore(5)
 
-    return pd.DataFrame(results)
+    async with httpx.AsyncClient(http2=True, timeout=60.0) as client:
+
+        async def sem_get_doc_content(doc):
+            symbol = symbol_map.get(doc['institution'], "UNKNOWN")
+            async with semaphore:
+                await asyncio.sleep(random.uniform(0.1, 0.5))
+                return await get_doc_content(client, doc, symbol, manifest)
+        
+        tasks = [sem_get_doc_content(doc) for doc in docs]
+
+        results = await asyncio.gather(*tasks)
+
+        save_manifest(manifest)
+        return results
