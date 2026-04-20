@@ -56,7 +56,7 @@ async def list_docs(
     return docs
 
 
-async def ingest_docs(docs: list) -> list:
+async def ingest_docs(docs: list, on_progress=None) -> list:
     manifest = load_manifest()
     symbol_map = get_institution_symbol_map()
 
@@ -68,7 +68,12 @@ async def ingest_docs(docs: list) -> list:
             symbol = symbol_map.get(doc['institution'], "UNKNOWN")
             async with semaphore:
                 await asyncio.sleep(random.uniform(0.1, 0.5))
-                return await get_doc_content(client, doc, symbol, manifest)
+                result = await get_doc_content(client, doc, symbol, manifest)
+            
+                if on_progress:
+                    on_progress()
+
+                return result
         
         tasks = [sem_get_doc_content(doc) for doc in docs]
 
